@@ -9,13 +9,14 @@ import re
 import smtplib
 import socket
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+import jpholiday
 import yaml
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -35,6 +36,29 @@ def load_config() -> dict:
 def log(msg: str) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {msg}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# 平日判定
+# ---------------------------------------------------------------------------
+
+def is_business_day(d: date) -> bool:
+    """平日（土日・日曜・祝日以外）の場合 True を返す。"""
+    if d.weekday() >= 5:  # 5=土曜、6=日曜
+        return False
+    if jpholiday.is_holiday(d):
+        return False
+    return True
+
+
+def skip_reason(d: date) -> str:
+    """スキップ理由の文字列を返す（ログ出力用）。"""
+    if d.weekday() == 5:
+        return "土曜日"
+    if d.weekday() == 6:
+        return "日曜日"
+    holiday_name = jpholiday.is_holiday(d)
+    return f"祝日（{holiday_name}）"
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +358,6 @@ def send_email(message: str, config: dict) -> None:
                 server.sendmail(sender, email_cfg["recipients"], msg.as_string())
         log("メール送信完了")
     except socket.gaierror:
-        # DNS名前解決失敗（主に smtp_server の設定誤り）
         log(
             f"メール送信エラー: SMTPサーバー '{smtp_server}' の名前解決に失敗しました。\n"
             f"  → config.yaml の smtp_server を正しいホスト名またはIPアドレスに変更してください。"
@@ -393,6 +416,11 @@ def send_slack(message: str, config: dict) -> None:
 def main() -> None:
     LOG_DIR.mkdir(exist_ok=True)
     log("タイムカード確認開始")
+
+    today = datetime.now().date()
+    if not is_business_day(today):
+        log(f"本日は{skip_reason(today)}のため処理をスキップします。")
+        sys.exit(0)
 
     config = load_config()
 
