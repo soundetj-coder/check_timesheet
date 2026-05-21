@@ -50,12 +50,34 @@ def scrape_attendance(config: dict) -> list[dict]:
         )
         page = context.new_page()
 
+        # 1. ページを開く
         try:
             page.goto(url, wait_until="networkidle", timeout=30_000)
         except PlaywrightTimeoutError:
             # タイムアウト後もDOM取得を試みる
             log("ページ読み込みタイムアウト。取得済みコンテンツで続行します。")
 
+        # 2. 「一覧表示」ボタンをクリックしてデータを表示する
+        try:
+            page.click('input[value="一覧表示"]', timeout=10_000)
+        except Exception:
+            # input[value] で見つからない場合はテキストで探す
+            try:
+                page.get_by_text("一覧表示").click(timeout=10_000)
+            except Exception as exc:
+                log(f"一覧表示ボタンが見つかりませんでした: {exc}")
+                browser.close()
+                return []
+
+        # 3. テーブルが表示されるまで待機する
+        try:
+            page.wait_for_selector("table", timeout=15_000)
+        except PlaywrightTimeoutError:
+            log("テーブルの表示を待機中にタイムアウトしました。")
+            browser.close()
+            return []
+
+        # 4. テーブルからデータを取得する
         tables = page.query_selector_all("table")
         if not tables:
             log("テーブルが見つかりませんでした。")
