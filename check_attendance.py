@@ -7,6 +7,7 @@ Windowsタスクスケジューラで毎朝10:00に実行する
 import json
 import re
 import smtplib
+import socket
 import sys
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
@@ -131,7 +132,6 @@ def _find_name_column(rows: list) -> int:
     headers = rows[0].query_selector_all("th, td")
     for i, header in enumerate(headers):
         text = header.inner_text().strip()
-        # 完全一致または閃内包含で判定
         if text in _NAME_HEADERS or any(h in text for h in _NAME_HEADERS):
             return i
 
@@ -149,7 +149,6 @@ def _parse_rows(rows: list, day_col_index: int, config: dict) -> list[dict]:
         if not cells:
             continue
 
-        # 氏名列が列数を超える場合は先頫列にフォールバック
         name_idx = name_col_index if name_col_index < len(cells) else 0
         name = cells[name_idx].inner_text().strip()
         if not name:
@@ -225,7 +224,6 @@ def _is_late(clock_in: str, cell_html: str, config: dict) -> bool:
     try:
         in_time = datetime.strptime(clock_in, "%H:%M").time()
         threshold = datetime.strptime(late_threshold, "%H:%M").time()
-        # threshold の次の分以降を遅刻とする（例: 09:30 設定 → 09:31以降）
         return in_time > threshold
     except ValueError:
         return False
@@ -335,6 +333,25 @@ def send_email(message: str, config: dict) -> None:
                     server.login(sender, password)
                 server.sendmail(sender, email_cfg["recipients"], msg.as_string())
         log("メール送信完了")
+    except socket.gaierror:
+        # DNS名前解決失敗（主に smtp_server の設定誤り）
+        log(
+            f"メール送信エラー: SMTPサーバー '{smtp_server}' の名前解決に失敗しました。\n"
+            f"  → config.yaml の smtp_server を正しいホスト名またはIPアドレスに変更してください。"
+        )
+        raise
+    except ConnectionRefusedError:
+        log(
+            f"メール送信エラー: SMTPサーバー '{smtp_server}:{smtp_port}' に接続できませんでした。\n"
+            f"  → smtp_server ・ smtp_port ・ use_tls/use_ssl の設定を確認してください。"
+        )
+        raise
+    except smtplib.SMTPAuthenticationError:
+        log(
+            "メール送信エラー: SMTP認証に失敗しました。\n"
+            "  → config.yaml の sender ・ password を確認してください。"
+        )
+        raise
     except Exception as exc:
         log(f"メール送信エラー: {exc}")
         raise
@@ -391,8 +408,22 @@ def main() -> None:
     message = format_message(employees, config)
     log("\n" + message + "\n")
 
-    send_email(message, config)
-    send_slack(message, config)
+    # メール・Slackは独立して実行—片方が失敗してももう片方は実行する
+    failed: list[str] = []
+
+    try:
+        send_email(message, config)
+    except Exception:
+        failed.append("メール")
+
+    try:
+        send_slack(message, config)
+    except Exception:
+        failed.append("Slack")
+
+    if failed:
+        log(f"通知失敗: {', '.join(failed)}")
+        sys.exit(1)
 
     log("タイムカード確認完了")
 
