@@ -6,7 +6,14 @@
 url: "http://report/ViewAttendance/ViewAttendance.php"
 
 # 遅刻判定の基準時刻（HH:MM形式）
-late_threshold: "09:00"
+# この時刻の「次の分」以降を遅刻とする
+# 例: "09:30" → 9:30まで正常、〇9:31以降が遅刻
+late_threshold: "09:30"
+
+# 朝チェックモード
+# true: 退勤未打刻を警告対象から除外する（午前実行時は true 推奨）
+# false: 退勤未打刻も警告対象に含める（山日後の夜間チェック時に使用）
+morning_check_mode: true
 
 # タスクスケジューラ設定の参考値（スクリプト自体はここを読まない）
 schedule_time: "10:00"
@@ -15,18 +22,19 @@ schedule_time: "10:00"
 # メール設定
 # -----------------------------------------------------------------
 email:
-  smtp_server: "mail.e-trek-japan.com"    # 社内SMTPサーバーのホスト名/IP
+  smtp_server: "smtp.example.com"    # 社内SMTPサーバーのホスト名/IP
   smtp_port: 587                      # 587(STARTTLS) / 465(SSL) / 25(平文)
   use_tls: true                       # STARTTLS を使う場合は true
   use_ssl: false                      # SMTPS(ポート465)を使う場合は true
-  sender: "tomokazu_miura@e-trek-japan.com"
-  password: "FdQ#W6nu"      # 認証不要なら空文字 ""
+  sender: "attendance-bot@example.com"
+  password: "your_smtp_password"      # 認証不要なら空文字 ""
   recipients:
-    - "tomokazu_miura@e-trek-japan.com"
+    - "manager@example.com"
+    - "hr@example.com"
 
 # -----------------------------------------------------------------
 # Slack 設定
 # -----------------------------------------------------------------
-# Slack Incoming Webhook URLを設定する。使用しない場合は空文字にする。
+# Slack Incoming Webhook URL を設定する。使用しない場合は空文字にする。
 # 例: https://hooks.slack.com/services/<T...>/<B...>/<トークン>
 slack_webhook_url: ""

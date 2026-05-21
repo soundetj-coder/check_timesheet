@@ -22,6 +22,9 @@ from playwright.sync_api import sync_playwright
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 LOG_DIR = Path(__file__).parent / "logs"
 
+# 氏名列と認識するヘッダー文字列
+_NAME_HEADERS = {"氏名", "名前", "社員名", "氏　名", "氏　　名", "社員氏名", "name"}
+
 
 def load_config() -> dict:
     with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -102,7 +105,6 @@ def _find_day_column(rows: list, today: datetime) -> int:
         return -1
 
     target = str(today.day)
-    # 候補パターン: "21", "5/21", "21日", "05/21"
     patterns = [
         target,
         f"{today.month}/{target}",
@@ -115,23 +117,41 @@ def _find_day_column(rows: list, today: datetime) -> int:
         text = header.inner_text().strip()
         if text in patterns:
             return i
-        # 「21」を含む複合表記（例: "月 21"）にも対応
         if re.search(rf"(?<![\d]){re.escape(target)}(?![\d])", text):
             return i
 
     return -1
 
 
+def _find_name_column(rows: list) -> int:
+    """ヘッダー行から氏名列のインデックスを返す。見つからない場合は 0（先頫列）。"""
+    if not rows:
+        return 0
+
+    headers = rows[0].query_selector_all("th, td")
+    for i, header in enumerate(headers):
+        text = header.inner_text().strip()
+        # 完全一致または閃内包含で判定
+        if text in _NAME_HEADERS or any(h in text for h in _NAME_HEADERS):
+            return i
+
+    log("氏名列が特定できず先頫列を使用します。")
+    return 0
+
+
 def _parse_rows(rows: list, day_col_index: int, config: dict) -> list[dict]:
     """データ行を走査して社員リストを生成する。"""
     employees = []
+    name_col_index = _find_name_column(rows)
 
     for row in rows[1:]:  # ヘッダー行をスキップ
         cells = row.query_selector_all("td, th")
         if not cells:
             continue
 
-        name = cells[0].inner_text().strip()
+        # 氏名列が列数を超える場合は先頫列にフォールバック
+        name_idx = name_col_index if name_col_index < len(cells) else 0
+        name = cells[name_idx].inner_text().strip()
         if not name:
             continue
 
@@ -186,7 +206,11 @@ def _analyze_cell(cell_text: str, cell_html: str, config: dict) -> tuple[str, st
 
 
 def _is_late(clock_in: str, cell_html: str, config: dict) -> bool:
-    """出勤時刻が遅刻かどうか判定する（赤字 or 基準時刻超過）。"""
+    """出勤時刻が遅刻かどうか判定する。
+
+    赤字、または late_threshold（例: "09:30"）を超えた時刻を遅刻とみなす。
+    例: late_threshold="09:30" → 9:31以降が遅刻、9:30までは正常。
+    """
     html_lower = cell_html.lower()
     if (
         "color:red" in html_lower
@@ -197,10 +221,11 @@ def _is_late(clock_in: str, cell_html: str, config: dict) -> bool:
     ):
         return True
 
-    late_threshold = config.get("late_threshold", "09:00")
+    late_threshold = config.get("late_threshold", "09:30")
     try:
         in_time = datetime.strptime(clock_in, "%H:%M").time()
         threshold = datetime.strptime(late_threshold, "%H:%M").time()
+        # threshold の次の分以降を遅刻とする（例: 09:30 設定 → 09:31以降）
         return in_time > threshold
     except ValueError:
         return False
@@ -210,9 +235,26 @@ def _is_late(clock_in: str, cell_html: str, config: dict) -> bool:
 # 通知メッセージ生成
 # ---------------------------------------------------------------------------
 
+def _apply_morning_mode(employees: list[dict]) -> list[dict]:
+    """朝チェックモード時、退勤未打刻を含むステータスを再分類する。
+
+    - 出勤のみ（退勤未打刻） → 正常
+    - 遅刻・退勤未打刻     → 遅刻
+    """
+    mapping = {
+        "出勤のみ（退勤未打刻）": "正常",
+        "遅刻・退勤未打刻": "遅刻",
+    }
+    return [{**e, "status": mapping.get(e["status"], e["status"])} for e in employees]
+
+
 def format_message(employees: list[dict], config: dict) -> str:
     today = datetime.now()
     date_str = today.strftime("%Y年%m月%d日")
+
+    morning_mode = config.get("morning_check_mode", True)
+    if morning_mode:
+        employees = _apply_morning_mode(employees)
 
     STATUS_LABELS = {
         "未打刻": "未打刻",
@@ -227,9 +269,10 @@ def format_message(employees: list[dict], config: dict) -> str:
     issues = [e for e in employees if e["status"] != "正常"]
     normal = [e for e in employees if e["status"] == "正常"]
 
+    mode_label = "（朝チェックモード）" if morning_mode else ""
     lines = [
-        f"【タイムカード確認レポート】{date_str}",
-        f"確認時刻: {today.strftime('%H:%M')}  基準時刻: {config.get('late_threshold', '09:00')}",
+        f"【タイムカード確認レポート】{date_str}{mode_label}",
+        f"確認時刻: {today.strftime('%H:%M')}  基準時刻: {config.get('late_threshold', '09:30')}",
         "=" * 44,
     ]
 
@@ -237,9 +280,7 @@ def format_message(employees: list[dict], config: dict) -> str:
         lines.append(f"\n■ 要確認 ({len(issues)}名)")
         for e in issues:
             label = STATUS_LABELS.get(e["status"], e["status"])
-            times = ""
-            if e["clock_in"]:
-                times = f"  出勤:{e['clock_in']}"
+            times = f"  出勤:{e['clock_in']}" if e["clock_in"] else ""
             if e["clock_out"]:
                 times += f"  退勤:{e['clock_out']}"
             lines.append(f"  [{label}] {e['name']}{times}")
@@ -249,7 +290,10 @@ def format_message(employees: list[dict], config: dict) -> str:
     if normal:
         lines.append(f"\n■ 正常打刻 ({len(normal)}名)")
         for e in normal:
-            lines.append(f"  {e['name']}  出勤:{e['clock_in']}  退勤:{e['clock_out']}")
+            times = f"  出勤:{e['clock_in']}" if e["clock_in"] else ""
+            if e["clock_out"]:
+                times += f"  退勤:{e['clock_out']}"
+            lines.append(f"  {e['name']}{times}")
 
     lines.append(f"\n合計: {len(employees)}名")
     return "\n".join(lines)
