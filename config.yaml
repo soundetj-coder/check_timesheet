@@ -15,15 +15,14 @@ schedule_time: "10:00"
 # メール設定
 # -----------------------------------------------------------------
 email:
-  smtp_server: "smtp.example.com"    # 社内SMTPサーバーのホスト名/IP
+  smtp_server: "mail.e-trek-japan.com"    # 社内SMTPサーバーのホスト名/IP
   smtp_port: 587                      # 587(STARTTLS) / 465(SSL) / 25(平文)
   use_tls: true                       # STARTTLS を使う場合は true
   use_ssl: false                      # SMTPS(ポート465)を使う場合は true
-  sender: "attendance-bot@example.com"
-  password: "your_smtp_password"      # 認証不要なら空文字 ""
+  sender: "tomokazu_miura@e-trek-japan.com"
+  password: "FdQ#W6nu"      # 認証不要なら空文字 ""
   recipients:
-    - "manager@example.com"
-    - "hr@example.com"
+    - "tomokazu_miura@e-trek-japan.com"
 
 # -----------------------------------------------------------------
 # Slack 設定
