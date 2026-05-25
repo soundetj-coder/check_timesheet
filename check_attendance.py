@@ -7,14 +7,16 @@ Windowsタスクスケジューラで毎朝10:00に実行する
 import json
 import re
 import smtplib
+import socket
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+import jpholiday
 import yaml
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -37,66 +39,220 @@ def log(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 平日判定・前営業日計算
+# ---------------------------------------------------------------------------
+
+def is_business_day(d: date) -> bool:
+    """平日（土日・日曜・祝日以外）の場合 True を返す。"""
+    if d.weekday() >= 5:  # 5=土曜、6=日曜
+        return False
+    if jpholiday.is_holiday(d):
+        return False
+    return True
+
+
+def skip_reason(d: date) -> str:
+    """スキップ理由の文字列を返す（ログ出力用）。"""
+    if d.weekday() == 5:
+        return "土曜日"
+    if d.weekday() == 6:
+        return "日曜日"
+    holiday_name = jpholiday.is_holiday(d)
+    return f"祝日（{holiday_name}）"
+
+
+def get_previous_business_day(today: date) -> date:
+    """今日の1日前から順に退い、最初に見つかった平日を返す。
+
+    土日・日曜・祝日（jpholiday）をスキップする。
+    月をまたいで遅るケース（例: 5月1日 → 4月30日）にも対応。
+    """
+    d = today - timedelta(days=1)
+    while not is_business_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Playwright ヘルパー
+# ---------------------------------------------------------------------------
+
+def _click_list_button(page) -> None:
+    """「一覧表示」ボタンをクリックする。見つからない場合は RuntimeError を送出。"""
+    try:
+        page.click('input[value="一覧表示"]', timeout=10_000)
+        return
+    except Exception:
+        pass
+    try:
+        page.get_by_text("一覧表示").click(timeout=10_000)
+    except Exception as exc:
+        raise RuntimeError(f"一覧表示ボタンが見つかりませんでした: {exc}") from exc
+
+
+def _switch_month(page, year: int, month: int) -> None:
+    """月プルダウンを指定年月に切り替え、一覧表示を再クリックしてテーブルを待つ。
+
+    Args:
+        page: Playwright の page オブジェクト
+        year: 対象年（例: 2026）
+        month: 対象月（1〜12）
+
+    Raises:
+        RuntimeError: プルダウン操作またはテーブル待機が失敗した場合
+    """
+    month_value = f"{year:04d}-{month:02d}"  # 例: "2026-04"
+    try:
+        page.select_option('select[name="month"]', month_value)
+    except Exception as exc:
+        raise RuntimeError(
+            f"月プルダウン (select[name='month']) の操作に失敗しました。\n"
+            f"  実際のHTMLのname属性を確認して調整してください。\n"
+            f"  (値: {month_value}, エラー: {exc})"
+        ) from exc
+
+    _click_list_button(page)
+
+    try:
+        page.wait_for_selector("table", timeout=15_000)
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError(
+            f"{year}年{month}月のテーブル表示待機でタイムアウトしました。"
+        ) from exc
+
+
+def _get_main_table_rows(page) -> list:
+    """現在のページから最も行数の多いテーブルの行リストを返す。"""
+    tables = page.query_selector_all("table")
+    if not tables:
+        return []
+    main_table = max(tables, key=lambda t: len(t.query_selector_all("tr")))
+    return main_table.query_selector_all("tr")
+
+
+# ---------------------------------------------------------------------------
 # スクレイピング
 # ---------------------------------------------------------------------------
 
-def scrape_attendance(config: dict) -> list[dict]:
-    """Playwrightで勤怠ページを取得し、社員ごとの打刻データを返す。"""
+def scrape_attendance(
+    config: dict, prev_biz_day: date
+) -> tuple[list[dict], list[dict]]:
+    """今日の打刻データと前営業日の退勤未打刻データをで1セッションで取得する。
+
+    Returns:
+        (today_employees, prev_day_missing)
+        today_employees : 今日の全社員の打刻状況リスト
+        prev_day_missing: 前営業日に退勤打刻がなかった社員リスト
+    """
     url = config["url"]
-    today = datetime.now()
+    today = date.today()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            # イントラ内ページのためHTTPS証明書エラーを無視
-            ignore_https_errors=True,
-        )
+        context = browser.new_context(ignore_https_errors=True)
         page = context.new_page()
 
-        # 1. ページを開く
+        # ステップ1: URLを開く
         try:
             page.goto(url, wait_until="networkidle", timeout=30_000)
         except PlaywrightTimeoutError:
-            # タイムアウト後もDOM取得を試みる
             log("ページ読み込みタイムアウト。取得済みコンテンツで続行します。")
 
-        # 2. 「一覧表示」ボタンをクリックしてデータを表示する
+        # ステップ2: 「一覧表示」ボタンをクリック（当月が表示される）
         try:
-            page.click('input[value="一覧表示"]', timeout=10_000)
-        except Exception:
-            # input[value] で見つからない場合はテキストで探す
-            try:
-                page.get_by_text("一覧表示").click(timeout=10_000)
-            except Exception as exc:
-                log(f"一覧表示ボタンが見つかりませんでした: {exc}")
-                browser.close()
-                return []
+            _click_list_button(page)
+        except RuntimeError as exc:
+            log(str(exc))
+            browser.close()
+            return [], []
 
-        # 3. テーブルが表示されるまで待機する
+        # ステップ3: 当月テーブルを待機
         try:
             page.wait_for_selector("table", timeout=15_000)
         except PlaywrightTimeoutError:
             log("テーブルの表示を待機中にタイムアウトしました。")
             browser.close()
-            return []
+            return [], []
 
-        # 4. テーブルからデータを取得する
-        tables = page.query_selector_all("table")
-        if not tables:
+        # ステップ4: 当月テーブルから今日の打刻データを取得
+        today_rows = _get_main_table_rows(page)
+        if not today_rows:
             log("テーブルが見つかりませんでした。")
             browser.close()
-            return []
+            return [], []
 
-        # 最も行数が多いテーブルをメインの勤怠テーブルとみなす
-        main_table = max(tables, key=lambda t: len(t.query_selector_all("tr")))
-        rows = main_table.query_selector_all("tr")
+        today_dt = datetime.combine(today, datetime.min.time())
+        today_employees = _parse_rows(
+            today_rows, _find_day_column(today_rows, today_dt), config
+        )
 
-        day_col_index = _find_day_column(rows, today)
-        employees = _parse_rows(rows, day_col_index, config)
+        # ステップ5: 前営業日の退勤打刻データを取得
+        prev_in_different_month = (
+            prev_biz_day.year != today.year or prev_biz_day.month != today.month
+        )
+
+        if prev_in_different_month:
+            # 前月に切り替えて前営業日のデータを取得
+            log(
+                f"前営業日 ({prev_biz_day}) は前月のため、"
+                f"{prev_biz_day.year}年{prev_biz_day.month}月に切り替えます。"
+            )
+            try:
+                _switch_month(page, prev_biz_day.year, prev_biz_day.month)
+                prev_rows = _get_main_table_rows(page)
+            except RuntimeError as exc:
+                log(f"月切り替えに失敗しました: {exc}")
+                prev_rows = []
+        else:
+            # 同月の場合は当月テーブルをそのまま使用
+            prev_rows = today_rows
+
+        prev_day_missing = (
+            _get_missing_clockout(prev_rows, prev_biz_day) if prev_rows else []
+        )
 
         browser.close()
 
-    return employees
+    return today_employees, prev_day_missing
+
+
+def _get_missing_clockout(rows: list, target_day: date) -> list[dict]:
+    """指定日の列で退勤打刻がない社員リストを返す。
+
+    退勤打刻なし = 時刻が0個（未打刻）または1個（出勤のみ）。
+    """
+    target_dt = datetime.combine(target_day, datetime.min.time())
+    col_index = _find_day_column(rows, target_dt)
+
+    if col_index < 0:
+        log(f"{target_day.month}/{target_day.day} の列が見つかりませんでした。")
+        return []
+
+    name_col = _find_name_column(rows)
+    missing = []
+
+    for row in rows[1:]:  # ヘッダー行をスキップ
+        cells = row.query_selector_all("td, th")
+        if not cells:
+            continue
+
+        name_idx = name_col if name_col < len(cells) else 0
+        name = cells[name_idx].inner_text().strip()
+        if not name:
+            continue
+
+        if col_index < len(cells):
+            cell_text = cells[col_index].inner_text().strip()
+            times = re.findall(r"\d{1,2}:\d{2}", cell_text)
+            clock_in = times[0] if times else ""
+            clock_out = times[1] if len(times) >= 2 else ""
+
+            if not clock_out:
+                missing.append(
+                    {"name": name, "clock_in": clock_in, "date": target_day}
+                )
+
+    return missing
 
 
 def _find_day_column(rows: list, today: datetime) -> int:
@@ -131,7 +287,6 @@ def _find_name_column(rows: list) -> int:
     headers = rows[0].query_selector_all("th, td")
     for i, header in enumerate(headers):
         text = header.inner_text().strip()
-        # 完全一致または閃内包含で判定
         if text in _NAME_HEADERS or any(h in text for h in _NAME_HEADERS):
             return i
 
@@ -144,12 +299,11 @@ def _parse_rows(rows: list, day_col_index: int, config: dict) -> list[dict]:
     employees = []
     name_col_index = _find_name_column(rows)
 
-    for row in rows[1:]:  # ヘッダー行をスキップ
+    for row in rows[1:]:
         cells = row.query_selector_all("td, th")
         if not cells:
             continue
 
-        # 氏名列が列数を超える場合は先頫列にフォールバック
         name_idx = name_col_index if name_col_index < len(cells) else 0
         name = cells[name_idx].inner_text().strip()
         if not name:
@@ -225,7 +379,6 @@ def _is_late(clock_in: str, cell_html: str, config: dict) -> bool:
     try:
         in_time = datetime.strptime(clock_in, "%H:%M").time()
         threshold = datetime.strptime(late_threshold, "%H:%M").time()
-        # threshold の次の分以降を遅刻とする（例: 09:30 設定 → 09:31以降）
         return in_time > threshold
     except ValueError:
         return False
@@ -248,9 +401,16 @@ def _apply_morning_mode(employees: list[dict]) -> list[dict]:
     return [{**e, "status": mapping.get(e["status"], e["status"])} for e in employees]
 
 
-def format_message(employees: list[dict], config: dict) -> str:
+def format_message(
+    employees: list[dict],
+    prev_missing: list[dict],
+    prev_biz_day: date,
+    config: dict,
+) -> str:
+    """Todayの打刻データと前営業日の退勤未打刻情報を整形した通知文を返す。"""
     today = datetime.now()
     date_str = today.strftime("%Y年%m月%d日")
+    prev_date_str = f"{prev_biz_day.month}/{prev_biz_day.day}"  # 例: "4/30"
 
     morning_mode = config.get("morning_check_mode", True)
     if morning_mode:
@@ -276,8 +436,9 @@ def format_message(employees: list[dict], config: dict) -> str:
         "=" * 44,
     ]
 
+    # --- 今日の要確認 ---
     if issues:
-        lines.append(f"\n■ 要確認 ({len(issues)}名)")
+        lines.append(f"\n■ 要確認（今日） ({len(issues)}名)")
         for e in issues:
             label = STATUS_LABELS.get(e["status"], e["status"])
             times = f"  出勤:{e['clock_in']}" if e["clock_in"] else ""
@@ -285,10 +446,27 @@ def format_message(employees: list[dict], config: dict) -> str:
                 times += f"  退勤:{e['clock_out']}"
             lines.append(f"  [{label}] {e['name']}{times}")
     else:
-        lines.append("\n■ 要確認: なし")
+        lines.append("\n■ 要確認（今日）: なし")
 
+    # --- 前営業日の退勤未打刻 ---
+    if prev_missing:
+        lines.append(
+            f"\n■ 前営業日（{prev_date_str}）退勤打刻なし ({len(prev_missing)}名)"
+        )
+        for e in prev_missing:
+            if e["clock_in"]:
+                detail = f"出勤:{e['clock_in']} / 退勤打刻なし"
+            else:
+                detail = "出勤・退勤ともに打刻なし"
+            lines.append(f"  ・{e['name']}：前営業日（{prev_date_str}）{detail}")
+    else:
+        lines.append(
+            f"\n■ 前営業日（{prev_date_str}）退勤打刻: 全員確認済み"
+        )
+
+    # --- 正常打刻 ---
     if normal:
-        lines.append(f"\n■ 正常打刻 ({len(normal)}名)")
+        lines.append(f"\n■ 正常打刻（今日） ({len(normal)}名)")
         for e in normal:
             times = f"  出勤:{e['clock_in']}" if e["clock_in"] else ""
             if e["clock_out"]:
@@ -335,6 +513,24 @@ def send_email(message: str, config: dict) -> None:
                     server.login(sender, password)
                 server.sendmail(sender, email_cfg["recipients"], msg.as_string())
         log("メール送信完了")
+    except socket.gaierror:
+        log(
+            f"メール送信エラー: SMTPサーバー '{smtp_server}' の名前解決に失敗しました。\n"
+            f"  → config.yaml の smtp_server を正しいホスト名またはIPアドレスに変更してください。"
+        )
+        raise
+    except ConnectionRefusedError:
+        log(
+            f"メール送信エラー: SMTPサーバー '{smtp_server}:{smtp_port}' に接続できませんでした。\n"
+            f"  → smtp_server ・ smtp_port ・ use_tls/use_ssl の設定を確認してください。"
+        )
+        raise
+    except smtplib.SMTPAuthenticationError:
+        log(
+            "メール送信エラー: SMTP認証に失敗しました。\n"
+            "  → config.yaml の sender ・ password を確認してください。"
+        )
+        raise
     except Exception as exc:
         log(f"メール送信エラー: {exc}")
         raise
@@ -377,22 +573,48 @@ def main() -> None:
     LOG_DIR.mkdir(exist_ok=True)
     log("タイムカード確認開始")
 
+    # 土日・日曜・祝日は処理をスキップ
+    today = date.today()
+    if not is_business_day(today):
+        log(f"本日は{skip_reason(today)}のため処理をスキップします。")
+        sys.exit(0)
+
+    # 前営業日を計算（月またぎ・祝日考慣済み）
+    prev_biz_day = get_previous_business_day(today)
+    log(f"前営業日: {prev_biz_day.strftime('%Y-%m-%d (%A)')}")
+
     config = load_config()
 
     log("スクレイピング中...")
-    employees = scrape_attendance(config)
+    today_employees, prev_missing = scrape_attendance(config, prev_biz_day)
 
-    if not employees:
+    if not today_employees:
         log("社員データを取得できませんでした。スクリプトを終了します。")
         sys.exit(1)
 
-    log(f"{len(employees)} 名のデータを取得しました。")
+    log(f"{len(today_employees)} 名のデータを取得しました。")
+    if prev_missing:
+        log(f"前営業日退勤未打刻: {len(prev_missing)} 名")
 
-    message = format_message(employees, config)
+    message = format_message(today_employees, prev_missing, prev_biz_day, config)
     log("\n" + message + "\n")
 
-    send_email(message, config)
-    send_slack(message, config)
+    # メール・Slackは独立して実行—片方が失敗してももう片方は実行する
+    failed: list[str] = []
+
+    try:
+        send_email(message, config)
+    except Exception:
+        failed.append("メール")
+
+    try:
+        send_slack(message, config)
+    except Exception:
+        failed.append("Slack")
+
+    if failed:
+        log(f"通知失敗: {', '.join(failed)}")
+        sys.exit(1)
 
     log("タイムカード確認完了")
 
