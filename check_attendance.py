@@ -39,7 +39,7 @@ def log(msg: str) -> None:
 
 
 def _hhmm_to_minutes(s: str) -> int:
-    """\"HH:MM\" を分に換算する。不正な値は -1。"""
+    """"HH:MM" を分に換算する。不正な値は -1。"""
     try:
         h, m = s.split(":")
         return int(h) * 60 + int(m)
@@ -370,7 +370,7 @@ def _is_late(clock_in: str, cell_html: str, config: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _excel_value_to_hhmm(value) -> str:
-    """Excelセルの値を \"HH:MM\" 文字列に変換する。空・不明は空文字。"""
+    """Excelセルの値を "HH:MM" 文字列に変換する。空・不明は空文字。"""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -452,7 +452,14 @@ def _find_application_column(ws, target_day: int, ot_cfg: dict) -> int:
 
 
 def _normalize_name(name: str) -> str:
-    """氏名のスペース（半角・全角）を除去して比較用に正規化する。"""
+    """氏名を比較用に正規化する。
+
+    ・タイムカード側: 「山田　太郎（ヤマダタロウ）」のようにフリガナが付く場合がある
+    ・Excel側:       「山田　太郎」（漢字のみ）
+    カッコ（半角・全角）内のフリガナを除去し、スペース（半角・全角）も除去して統一する。
+    """
+    # （フリガナ）や (フリガナ) を除去
+    name = re.sub(r'[（(][^）)]*[）)]', '', name)
     return name.replace(" ", "").replace("　", "").strip()
 
 
@@ -522,7 +529,7 @@ def check_overtime_applications(
 
         row = _find_employee_row(ws, name, name_col, data_start_row)
         if row < 0:
-            log(f"  シート上に氏名なし: '{name}' (正規化後: '{_normalize_name(name)}'")
+            log(f"  シート上に氏名なし: '{name}' (正規化後: '{_normalize_name(name)}')")
             violations.append(
                 {"name": name, "clock_out": clock_out, "applied": "", "reason": "シート上に氏名なし"}
             )
@@ -785,7 +792,6 @@ def main() -> None:
             log(f"  - {e['name']}: 退勤={e['clock_out']}")
     else:
         log("前営業日残業者: 0名")
-        # タイムカードから取得できた退勤時刻のサンプルを出力（なぜ0名かの診断用）
         if prev_attendance:
             log(f"  前営業日打刻サンプル（最大5名、閾値={ot_cfg.get('overtime_threshold','18:30')}）:")
             for e in prev_attendance[:5]:
