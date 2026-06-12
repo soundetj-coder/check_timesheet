@@ -477,6 +477,12 @@ def _ljust_ea(s: str, width: int) -> str:
     return s + ' ' * pad
 
 
+def _rjust_ea(s: str, width: int) -> str:
+    """表示幅ベースで右揃えにパディングする。"""
+    pad = max(0, width - _ea_width(s))
+    return ' ' * pad + s
+
+
 def _find_employee_row(ws, name: str, name_col: int, data_start_row: int) -> int:
     """氏名列を走査して一致する社員の行番号を返す。見つからない場合は -1。"""
     target = _normalize_name(name)
@@ -661,23 +667,28 @@ def format_message(
             lines.append(
                 f"\n■ 前営業日（{prev_date_str}）残業申請チェック ({len(overtime_violations)}名)"
             )
-            # 氏名列の最大表示幅を動的に計算して揃える
-            col_w = max(
-                _ea_width("氏名"),
-                max(_ea_width(_display_name(v["name"])) for v in overtime_violations),
-            )
-            lines.append(
-                f"  {_ljust_ea('氏名', col_w)}  {'事前申請時間':>8}  {'実残業時間':>8}"
-            )
-            lines.append(f"  {'─' * (col_w + 22)}")
+            # 各行の表示用値を事前に計算
+            rows_data = []
             for v in overtime_violations:
                 name = _display_name(v["name"])
                 applied_str = v["applied"] if v["applied"] else "────"
                 actual = v["clock_out"]
                 if v["reason"] == "申請時間超過":
                     actual += "（超過）"
+                rows_data.append((name, applied_str, actual))
+
+            # 各列の最大表示幅を計算（ヘッダーと全データ行で）
+            col1_w = max(_ea_width("氏名"), max(_ea_width(r[0]) for r in rows_data))
+            col2_w = max(_ea_width("事前申請時間"), max(_ea_width(r[1]) for r in rows_data))
+            col3_w = max(_ea_width("実残業時間"), max(_ea_width(r[2]) for r in rows_data))
+
+            lines.append(
+                f"  {_ljust_ea('氏名', col1_w)}  {_rjust_ea('事前申請時間', col2_w)}  {'実残業時間'}"
+            )
+            lines.append(f"  {'─' * (col1_w + col2_w + col3_w + 4)}")
+            for name, applied_str, actual in rows_data:
                 lines.append(
-                    f"  {_ljust_ea(name, col_w)}  {applied_str:>8}  {actual}"
+                    f"  {_ljust_ea(name, col1_w)}  {_rjust_ea(applied_str, col2_w)}  {actual}"
                 )
         else:
             lines.append(
