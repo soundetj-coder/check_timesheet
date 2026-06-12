@@ -483,6 +483,15 @@ def _rjust_ea(s: str, width: int) -> str:
     return ' ' * pad + s
 
 
+def _floor_to_unit(hhmm: str, unit_minutes: int) -> str:
+    """時刻文字列を unit_minutes 単位で切り捨てる（例: 20:08 → 20:00）。"""
+    minutes = _hhmm_to_minutes(hhmm)
+    if minutes < 0:
+        return hhmm
+    floored = (minutes // unit_minutes) * unit_minutes
+    return f"{floored // 60:02d}:{floored % 60:02d}"
+
+
 def _find_employee_row(ws, name: str, name_col: int, data_start_row: int) -> int:
     """氏名列を走査して一致する社員の行番号を返す。見つからない場合は -1。"""
     target = _normalize_name(name)
@@ -667,12 +676,13 @@ def format_message(
             lines.append(
                 f"\n■ 前営業日（{prev_date_str}）残業申請チェック ({len(overtime_violations)}名)"
             )
-            # 各行の表示用値を事前に計算
+            # 各行の表示用値を事前に計算（実残業時間は集計単位で切り捨て）
+            unit_minutes = config.get("overtime", {}).get("unit_minutes", 15)
             rows_data = []
             for v in overtime_violations:
                 name = _display_name(v["name"])
                 applied_str = v["applied"] if v["applied"] else "────"
-                actual = v["clock_out"]
+                actual = _floor_to_unit(v["clock_out"], unit_minutes)
                 if v["reason"] == "申請時間超過":
                     actual += "（超過）"
                 rows_data.append((name, applied_str, actual))
