@@ -9,6 +9,7 @@ import re
 import smtplib
 import socket
 import sys
+import unicodedata
 from datetime import date, datetime, time, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -452,15 +453,28 @@ def _find_application_column(ws, target_day: int, ot_cfg: dict) -> int:
 
 
 def _normalize_name(name: str) -> str:
-    """氏名を比較用に正規化する。
-
-    ・タイムカード側: 「山田　太郎（ヤマダタロウ）」のようにフリガナが付く場合がある
-    ・Excel側:       「山田　太郎」（漢字のみ）
-    カッコ（半角・全角）内のフリガナを除去し、スペース（半角・全角）も除去して統一する。
-    """
-    # （フリガナ）や (フリガナ) を除去
+    """氏名を比較用に正規化する（フリガナ・スペース除去）。"""
     name = re.sub(r'[（(][^）)]*[）)]', '', name)
     return name.replace(" ", "").replace("　", "").strip()
+
+
+def _display_name(name: str) -> str:
+    """フリガナ（カッコ内）を除去した表示用の氏名を返す（スペースは保持）。"""
+    return re.sub(r'[（(][^）)]*[）)]', '', name).strip()
+
+
+def _ea_width(s: str) -> int:
+    """文字列の表示幅を返す（全角=2、半角=1）。"""
+    return sum(
+        2 if unicodedata.east_asian_width(c) in ('W', 'F', 'A') else 1
+        for c in s
+    )
+
+
+def _ljust_ea(s: str, width: int) -> str:
+    """表示幅ベースで左揃えにパディングする。"""
+    pad = max(0, width - _ea_width(s))
+    return s + ' ' * pad
 
 
 def _find_employee_row(ws, name: str, name_col: int, data_start_row: int) -> int:
@@ -522,7 +536,11 @@ def check_overtime_applications(
     name_col = column_index_from_string(ot_cfg.get("name_column", "C"))
     data_start_row = ot_cfg.get("data_start_row", 16)
 
-    # 集計単位（分）。申請19:30 かつ unit_minutes=15 なら 19:44 まで許容
+    # 集計単位（分）に基づく許容幅
+    # 例: unit_minutes=15 → tolerance=14分
+    #   申請あり: 申請時刻+14分まで許容
+    #   申請なし: overtime_threshold+14分まで許容（18:30基準なら18:44まで申請不要）
+    threshold_min = _hhmm_to_minutes(ot_cfg.get("overtime_threshold", "18:30"))
     unit_minutes = ot_cfg.get("unit_minutes", 15)
     tolerance = unit_minutes - 1
 
@@ -541,13 +559,16 @@ def check_overtime_applications(
 
         applied = _excel_value_to_hhmm(ws.cell(row=row, column=app_col).value)
         log(f"  {name}: 退勤={clock_out}, 申請={applied if applied else '(なし)'}")
+
         if not applied:
-            violations.append(
-                {"name": name, "clock_out": clock_out, "applied": "", "reason": "申請なし"}
-            )
+            # 申請なし: overtime_threshold + tolerance を超えた場合のみ違反
+            # 例: 18:30+14分=18:44 → 18:45以降が違反
+            if _hhmm_to_minutes(clock_out) > threshold_min + tolerance:
+                violations.append(
+                    {"name": name, "clock_out": clock_out, "applied": "", "reason": "申請なし"}
+                )
         elif _hhmm_to_minutes(clock_out) > _hhmm_to_minutes(applied) + tolerance:
-            # 退勤が「申請時刻 + (集計単位-1)分」を超えた場合のみ超過とみなす
-            # 例: 申請19:30, unit_minutes=15 → 19:44まで許容、19:45から超過
+            # 申請あり: 申請時刻 + tolerance を超えた場合のみ違反
             violations.append(
                 {
                     "name": name,
@@ -640,14 +661,24 @@ def format_message(
             lines.append(
                 f"\n■ 前営業日（{prev_date_str}）残業申請チェック ({len(overtime_violations)}名)"
             )
+            # 氏名列の最大表示幅を動的に計算して揃える
+            col_w = max(
+                _ea_width("氏名"),
+                max(_ea_width(_display_name(v["name"])) for v in overtime_violations),
+            )
+            lines.append(
+                f"  {_ljust_ea('氏名', col_w)}  {'事前申請時間':>8}  {'実残業時間':>8}"
+            )
+            lines.append(f"  {'─' * (col_w + 22)}")
             for v in overtime_violations:
+                name = _display_name(v["name"])
+                applied_str = v["applied"] if v["applied"] else "────"
+                actual = v["clock_out"]
                 if v["reason"] == "申請時間超過":
-                    detail = f"退勤{v['clock_out']} / 申請{v['applied']}（超過）"
-                elif v["reason"] == "申請なし":
-                    detail = f"退勤{v['clock_out']} / 残業申請なし"
-                else:
-                    detail = f"退勤{v['clock_out']} / {v['reason']}"
-                lines.append(f"  ・{v['name']}：{detail}")
+                    actual += "（超過）"
+                lines.append(
+                    f"  {_ljust_ea(name, col_w)}  {applied_str:>8}  {actual}"
+                )
         else:
             lines.append(
                 f"\n■ 前営業日（{prev_date_str}）残業申請チェック: 違反なし"
