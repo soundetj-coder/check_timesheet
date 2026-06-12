@@ -49,7 +49,7 @@ overtime:
 
   # 勤務状況管理シートのパス（社内サーバーのUNCパスも可）
   # 例: "\\\\server\\share\\勤務状況管理シート.xlsx"
-  excel_path: ""
+  excel_path: '\\lorthos\データ受け渡し\残業時間申請\【AM】残業時間管理(1日-末日)_2026年度.xlsx'
 
   # 残業とみなす退勤時刻の基準（この時刻以降の退勤を残業としてチェック）
   overtime_threshold: "18:30"
