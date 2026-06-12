@@ -32,6 +32,7 @@ email:
   #   python -c "import keyring; keyring.set_password('timecard_notifier', 'tomokazu_miura@e-trek-japan.com', 'パスワード')"
   recipients:
     - "tomokazu_miura@e-trek-japan.com"
+    - "miura@e-trek-japan.com"
 
 # -----------------------------------------------------------------
 # Slack 設定
