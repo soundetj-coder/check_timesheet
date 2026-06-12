@@ -522,6 +522,10 @@ def check_overtime_applications(
     name_col = column_index_from_string(ot_cfg.get("name_column", "C"))
     data_start_row = ot_cfg.get("data_start_row", 16)
 
+    # 集計単位（分）。申請19:30 かつ unit_minutes=15 なら 19:44 まで許容
+    unit_minutes = ot_cfg.get("unit_minutes", 15)
+    tolerance = unit_minutes - 1
+
     violations = []
     for emp in prev_overtime:
         name = emp["name"]
@@ -541,7 +545,9 @@ def check_overtime_applications(
             violations.append(
                 {"name": name, "clock_out": clock_out, "applied": "", "reason": "申請なし"}
             )
-        elif _hhmm_to_minutes(clock_out) > _hhmm_to_minutes(applied):
+        elif _hhmm_to_minutes(clock_out) > _hhmm_to_minutes(applied) + tolerance:
+            # 退勤が「申請時刻 + (集計単位-1)分」を超えた場合のみ超過とみなす
+            # 例: 申請19:30, unit_minutes=15 → 19:44まで許容、19:45から超過
             violations.append(
                 {
                     "name": name,
