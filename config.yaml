@@ -27,7 +27,9 @@ email:
   use_tls: true                       # STARTTLS を使う場合は true
   use_ssl: false                      # SMTPS(ポート465)を使う場合は true
   sender: "tomokazu_miura@e-trek-japan.com"
-  password: "FdQ#W6nu"      # 認証不要なら空文字 ""
+  # パスワードはWindowsの資格情報マネージャーに保存します（config.yamlには書きません）
+  # 初回登録コマンド:
+  #   python -c "import keyring; keyring.set_password('timecard_notifier', 'tomokazu_miura@e-trek-japan.com', 'パスワード')"
   recipients:
     - "tomokazu_miura@e-trek-japan.com"
 

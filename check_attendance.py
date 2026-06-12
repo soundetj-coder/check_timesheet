@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+import keyring
 import jpholiday
 import yaml
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -735,9 +736,18 @@ def send_email(message: str, config: dict) -> None:
     smtp_server = email_cfg["smtp_server"]
     smtp_port = email_cfg["smtp_port"]
     sender = email_cfg["sender"]
-    password = email_cfg.get("password", "")
     use_tls = email_cfg.get("use_tls", True)
     use_ssl = email_cfg.get("use_ssl", False)
+
+    # Windowsの資格情報マネージャーからパスワードを取得
+    password = keyring.get_password("timecard_notifier", sender) or ""
+    if not password:
+        log(
+            "SMTPパスワードが資格情報マネージャーに登録されていません。\n"
+            "  以下のコマンドを一度だけ実行してください:\n"
+            f"  python -c \"import keyring; keyring.set_password('timecard_notifier', '{sender}', 'パスワード')\""
+        )
+        raise RuntimeError("SMTPパスワード未設定")
 
     try:
         if use_ssl:
@@ -768,7 +778,8 @@ def send_email(message: str, config: dict) -> None:
     except smtplib.SMTPAuthenticationError:
         log(
             "メール送信エラー: SMTP認証に失敗しました。\n"
-            "  → config.yaml の sender ・ password を確認してください。"
+            f"  → 資格情報マネージャーに登録したパスワードを確認してください。\n"
+            f"  python -c \"import keyring; keyring.set_password('timecard_notifier', '{sender}', '正しいパスワード')\""
         )
         raise
     except Exception as exc:
