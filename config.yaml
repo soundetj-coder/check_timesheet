@@ -56,7 +56,7 @@ overtime:
 
   # 月別シート名のフォーマット（{month}=月, {year}=年）
   # 例: "6月" になる
-sheet_name_format: "{month}月"
+  sheet_name_format: "{month}月"
 
   # ----- シートのレイアウト（実際のExcelに合わせて調整）-----
   header_day_row: 13     # 日付（日番号 9,10,11...）が書かれている行
