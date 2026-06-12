@@ -39,7 +39,7 @@ def log(msg: str) -> None:
 
 
 def _hhmm_to_minutes(s: str) -> int:
-    """"HH:MM" を分に換算する。不正な値は -1。"""
+    """\"HH:MM\" を分に換算する。不正な値は -1。"""
     try:
         h, m = s.split(":")
         return int(h) * 60 + int(m)
@@ -71,11 +71,7 @@ def skip_reason(d: date) -> str:
 
 
 def get_previous_business_day(today: date) -> date:
-    """今日の1日前から順に退い、最初に見つかった平日を返す。
-
-    土日・日曜・祝日（jpholiday）をスキップする。
-    月をまたいで遅るケース（例: 5月1日 → 4月30日）にも対応。
-    """
+    """今日の1日前から順に遡り、最初に見つかった平日を返す。"""
     d = today - timedelta(days=1)
     while not is_business_day(d):
         d -= timedelta(days=1)
@@ -101,7 +97,7 @@ def _click_list_button(page) -> None:
 
 def _switch_month(page, year: int, month: int) -> None:
     """月プルダウンを指定年月に切り替え、一覧表示を再クリックしてテーブルを待つ。"""
-    month_value = f"{year:04d}-{month:02d}"  # 例: "2026-04"
+    month_value = f"{year:04d}-{month:02d}"
     try:
         page.select_option('select[name="month"]', month_value)
     except Exception as exc:
@@ -137,14 +133,7 @@ def _get_main_table_rows(page) -> list:
 def scrape_attendance(
     config: dict, prev_biz_day: date
 ) -> tuple[list[dict], list[dict]]:
-    """今日の打刻データと前営業日の全社員の打刻データで1セッションで取得する。
-
-    Returns:
-        (today_employees, prev_day_attendance)
-        today_employees    : 今日の全社員の打刻状況リスト
-        prev_day_attendance: 前営業日の全社員の出退勤リスト
-                             [{name, clock_in, clock_out, date}, ...]
-    """
+    """今日の打刻データと前営業日の全社員の打刻データを1セッションで取得する。"""
     url = config["url"]
     today = date.today()
 
@@ -153,13 +142,11 @@ def scrape_attendance(
         context = browser.new_context(ignore_https_errors=True)
         page = context.new_page()
 
-        # ステップ1: URLを開く
         try:
             page.goto(url, wait_until="networkidle", timeout=30_000)
         except PlaywrightTimeoutError:
             log("ページ読み込みタイムアウト。取得済みコンテンツで続行します。")
 
-        # ステップ2: 「一覧表示」ボタンをクリック（当月が表示される）
         try:
             _click_list_button(page)
         except RuntimeError as exc:
@@ -167,7 +154,6 @@ def scrape_attendance(
             browser.close()
             return [], []
 
-        # ステップ3: 当月テーブルを待機
         try:
             page.wait_for_selector("table", timeout=15_000)
         except PlaywrightTimeoutError:
@@ -175,7 +161,6 @@ def scrape_attendance(
             browser.close()
             return [], []
 
-        # ステップ4: 当月テーブルから今日の打刻データを取得
         today_rows = _get_main_table_rows(page)
         if not today_rows:
             log("テーブルが見つかりませんでした。")
@@ -187,7 +172,6 @@ def scrape_attendance(
             today_rows, _find_day_column(today_rows, today_dt), config
         )
 
-        # ステップ5: 前営業日の出退勤データを取得
         prev_in_different_month = (
             prev_biz_day.year != today.year or prev_biz_day.month != today.month
         )
@@ -216,11 +200,7 @@ def scrape_attendance(
 
 
 def _get_day_attendance(rows: list, target_day: date) -> list[dict]:
-    """指定日の列から全社員の出退勤時刻を抽出する。
-
-    Returns:
-        [{name, clock_in, clock_out, date}, ...]
-    """
+    """指定日の列から全社員の出退勤時刻を抽出する。"""
     target_dt = datetime.combine(target_day, datetime.min.time())
     col_index = _find_day_column(rows, target_dt)
 
@@ -231,7 +211,7 @@ def _get_day_attendance(rows: list, target_day: date) -> list[dict]:
     name_col = _find_name_column(rows)
     result = []
 
-    for row in rows[1:]:  # ヘッダー行をスキップ
+    for row in rows[1:]:
         cells = row.query_selector_all("td, th")
         if not cells:
             continue
@@ -285,7 +265,7 @@ def _find_day_column(rows: list, today: datetime) -> int:
 
 
 def _find_name_column(rows: list) -> int:
-    """ヘッダー行から氏名列のインデックスを返す。見つからない場合は 0（先頫列）。"""
+    """ヘッダー行から氏名列のインデックスを返す。見つからない場合は 0（先頭列）。"""
     if not rows:
         return 0
 
@@ -295,7 +275,7 @@ def _find_name_column(rows: list) -> int:
         if text in _NAME_HEADERS or any(h in text for h in _NAME_HEADERS):
             return i
 
-    log("氏名列が特定できず先頫列を使用します。")
+    log("氏名列が特定できず先頭列を使用します。")
     return 0
 
 
@@ -365,11 +345,7 @@ def _analyze_cell(cell_text: str, cell_html: str, config: dict) -> tuple[str, st
 
 
 def _is_late(clock_in: str, cell_html: str, config: dict) -> bool:
-    """出勤時刻が遅刻かどうか判定する。
-
-    赤字、または late_threshold（例: "09:30"）を超えた時刻を遅刻とみなす。
-    例: late_threshold="09:30" → 9:31以降が遅刻、9:30までは正常。
-    """
+    """出勤時刻が遅刻かどうか判定する。"""
     html_lower = cell_html.lower()
     if (
         "color:red" in html_lower
@@ -394,7 +370,7 @@ def _is_late(clock_in: str, cell_html: str, config: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _excel_value_to_hhmm(value) -> str:
-    """Excelセルの値を "HH:MM" 文字列に変換する。空・不明は空文字。"""
+    """Excelセルの値を \"HH:MM\" 文字列に変換する。空・不明は空文字。"""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -419,14 +395,20 @@ def _parse_day_number(v):
     if isinstance(v, bool):
         return None
     if isinstance(v, int):
-        return v
+        return v if 1 <= v <= 31 else None
     if isinstance(v, float):
-        return int(v)
+        i = int(v)
+        return i if 1 <= i <= 31 else None
+    # datetime は date のサブクラスなので先にチェックする
     if isinstance(v, datetime):
+        return v.day
+    if isinstance(v, date):
         return v.day
     if isinstance(v, str):
         m = re.search(r"\d{1,2}", v)
-        return int(m.group(0)) if m else None
+        if m:
+            i = int(m.group(0))
+            return i if 1 <= i <= 31 else None
     return None
 
 
@@ -436,15 +418,20 @@ def _find_application_column(ws, target_day: int, ot_cfg: dict) -> int:
     13行（日番号）はマージセルのため、値は左端セルにのみ入る。
     カラムを走査しながら直近の日番号を保持し、15行が「申請」の列を探す。
     """
+    from openpyxl.utils import get_column_letter
+
     day_row = ot_cfg.get("header_day_row", 13)
     sub_row = ot_cfg.get("subheader_row", 15)
     current_day = None
+    found_days = {}  # デバッグ用: {day: col}
 
     for col in range(1, ws.max_column + 1):
         dv = ws.cell(row=day_row, column=col).value
         parsed = _parse_day_number(dv)
         if parsed is not None:
             current_day = parsed
+            if parsed not in found_days:
+                found_days[parsed] = col
 
         sub = ws.cell(row=sub_row, column=col).value
         if (
@@ -452,8 +439,15 @@ def _find_application_column(ws, target_day: int, ot_cfg: dict) -> int:
             and isinstance(sub, str)
             and "申請" in sub
         ):
+            log(f"  → {target_day}日の申請列: {get_column_letter(col)}{sub_row}")
             return col
 
+    # 見つからなかった場合のデバッグ情報
+    log(f"  行{day_row}で検出された日番号: {sorted(found_days.items())}")
+    if target_day not in found_days:
+        log(f"  ※ {target_day}日が行{day_row}に存在しません（行番号設定を確認してください）")
+    else:
+        log(f"  ※ {target_day}日は列{get_column_letter(found_days[target_day])}にありますが、行{sub_row}に「申請」が見つかりません")
     return -1
 
 
@@ -475,12 +469,7 @@ def _find_employee_row(ws, name: str, name_col: int, data_start_row: int) -> int
 def check_overtime_applications(
     prev_overtime: list[dict], prev_biz_day: date, config: dict
 ) -> list[dict]:
-    """前営業日に残業した社員について、Excelの事前申請と照合する。
-
-    Returns:
-        違反リスト [{name, clock_out, applied, reason}, ...]
-        reason: "申請なし" / "申請時間超過" / "シート上に氏名なし"
-    """
+    """前営業日に残業した社員について、Excelの事前申請と照合する。"""
     ot_cfg = config.get("overtime", {})
     if not ot_cfg.get("enabled", False):
         return []
@@ -504,7 +493,6 @@ def check_overtime_applications(
         return []
 
     try:
-        # data_only=True で計算済みの値を読む（マージセル処理のため read_only は使わない）
         wb = openpyxl.load_workbook(excel_path, data_only=True)
     except Exception as exc:
         log(f"Excelファイルの読み込みに失敗しました: {exc}")
@@ -518,6 +506,7 @@ def check_overtime_applications(
         return []
     ws = wb[sheet_name]
 
+    log(f"Excel照合: シート='{sheet_name}', 対象日={prev_biz_day.month}/{prev_biz_day.day}")
     app_col = _find_application_column(ws, prev_biz_day.day, ot_cfg)
     if app_col < 0:
         log(f"{prev_biz_day.month}/{prev_biz_day.day} の「申請」列がシート上に見つかりませんでした。")
@@ -533,12 +522,14 @@ def check_overtime_applications(
 
         row = _find_employee_row(ws, name, name_col, data_start_row)
         if row < 0:
+            log(f"  シート上に氏名なし: '{name}' (正規化後: '{_normalize_name(name)}'")
             violations.append(
                 {"name": name, "clock_out": clock_out, "applied": "", "reason": "シート上に氏名なし"}
             )
             continue
 
         applied = _excel_value_to_hhmm(ws.cell(row=row, column=app_col).value)
+        log(f"  {name}: 退勤={clock_out}, 申請={applied if applied else '(なし)'}")
         if not applied:
             violations.append(
                 {"name": name, "clock_out": clock_out, "applied": "", "reason": "申請なし"}
@@ -552,7 +543,6 @@ def check_overtime_applications(
                     "reason": "申請時間超過",
                 }
             )
-        # 申請時間内なら違反なし（追加しない）
 
     return violations
 
@@ -562,11 +552,7 @@ def check_overtime_applications(
 # ---------------------------------------------------------------------------
 
 def _apply_morning_mode(employees: list[dict]) -> list[dict]:
-    """朝チェックモード時、退勤未打刻を含むステータスを再分類する。
-
-    - 出勤のみ（退勤未打刻） → 正常
-    - 遅刻・退勤未打刻     → 遅刻
-    """
+    """朝チェックモード時、退勤未打刻を含むステータスを再分類する。"""
     mapping = {
         "出勤のみ（退勤未打刻）": "正常",
         "遅刻・退勤未打刻": "遅刻",
@@ -584,7 +570,7 @@ def format_message(
     """今日の打刻・前営業日の退勤未打刻・残業申請違反を整形した通知文を返す。"""
     today = datetime.now()
     date_str = today.strftime("%Y年%m月%d日")
-    prev_date_str = f"{prev_biz_day.month}/{prev_biz_day.day}"  # 例: "6/11"
+    prev_date_str = f"{prev_biz_day.month}/{prev_biz_day.day}"
 
     morning_mode = config.get("morning_check_mode", True)
     if morning_mode:
@@ -610,7 +596,6 @@ def format_message(
         "=" * 44,
     ]
 
-    # --- 今日の要確認 ---
     if issues:
         lines.append(f"\n■ 要確認（今日） ({len(issues)}名)")
         for e in issues:
@@ -622,7 +607,6 @@ def format_message(
     else:
         lines.append("\n■ 要確認（今日）: なし")
 
-    # --- 前営業日の退勤未打刻 ---
     if prev_missing:
         lines.append(
             f"\n■ 前営業日（{prev_date_str}）退勤打刻なし ({len(prev_missing)}名)"
@@ -638,7 +622,6 @@ def format_message(
             f"\n■ 前営業日（{prev_date_str}）退勤打刻: 全員確認済み"
         )
 
-    # --- 残業事前申請違反 ---
     if config.get("overtime", {}).get("enabled", False):
         if overtime_violations:
             lines.append(
@@ -649,7 +632,7 @@ def format_message(
                     detail = f"退勤{v['clock_out']} / 申請{v['applied']}（超過）"
                 elif v["reason"] == "申請なし":
                     detail = f"退勤{v['clock_out']} / 残業申請なし"
-                else:  # シート上に氏名なし
+                else:
                     detail = f"退勤{v['clock_out']} / {v['reason']}"
                 lines.append(f"  ・{v['name']}：{detail}")
         else:
@@ -657,7 +640,6 @@ def format_message(
                 f"\n■ 前営業日（{prev_date_str}）残業申請チェック: 違反なし"
             )
 
-    # --- 正常打刻 ---
     if normal:
         lines.append(f"\n■ 正常打刻（今日） ({len(normal)}名)")
         for e in normal:
@@ -766,13 +748,11 @@ def main() -> None:
     LOG_DIR.mkdir(exist_ok=True)
     log("タイムカード確認開始")
 
-    # 土日・日曜・祝日は処理をスキップ
     today = date.today()
     if not is_business_day(today):
         log(f"本日は{skip_reason(today)}のため処理をスキップします。")
         sys.exit(0)
 
-    # 前営業日を計算（月またぎ・祝日考慮済み）
     prev_biz_day = get_previous_business_day(today)
     log(f"前営業日: {prev_biz_day.strftime('%Y-%m-%d (%A)')}")
 
@@ -787,12 +767,10 @@ def main() -> None:
 
     log(f"{len(today_employees)} 名のデータを取得しました。")
 
-    # 前営業日の退勤未打刻を抽出
     prev_missing = [e for e in prev_attendance if not e["clock_out"]]
     if prev_missing:
         log(f"前営業日退勤未打刻: {len(prev_missing)} 名")
 
-    # 前営業日の残業者（overtime_threshold 以降に退勤）を抽出
     ot_cfg = config.get("overtime", {})
     threshold_min = _hhmm_to_minutes(ot_cfg.get("overtime_threshold", "18:30"))
     prev_overtime = [
@@ -800,10 +778,21 @@ def main() -> None:
         for e in prev_attendance
         if e["clock_out"] and _hhmm_to_minutes(e["clock_out"]) >= threshold_min
     ]
+
     if prev_overtime:
         log(f"前営業日残業者: {len(prev_overtime)} 名 → Excelで事前申請を照合します。")
+        for e in prev_overtime:
+            log(f"  - {e['name']}: 退勤={e['clock_out']}")
+    else:
+        log("前営業日残業者: 0名")
+        # タイムカードから取得できた退勤時刻のサンプルを出力（なぜ0名かの診断用）
+        if prev_attendance:
+            log(f"  前営業日打刻サンプル（最大5名、閾値={ot_cfg.get('overtime_threshold','18:30')}）:")
+            for e in prev_attendance[:5]:
+                log(f"  - {e['name']}: 出勤={e['clock_in']}, 退勤={e['clock_out']}")
+        else:
+            log("  前営業日の打刻データが0件です（タイムカード側でデータが取れていません）")
 
-    # Excel参照で残業事前申請をチェック
     overtime_violations = check_overtime_applications(prev_overtime, prev_biz_day, config)
     if overtime_violations:
         log(f"残業申請違反: {len(overtime_violations)} 名")
@@ -813,7 +802,6 @@ def main() -> None:
     )
     log("\n" + message + "\n")
 
-    # メール・Slackは独立して実行—片方が失敗してももう片方は実行する
     failed: list[str] = []
 
     try:
