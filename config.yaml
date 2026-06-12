@@ -7,7 +7,7 @@ url: "http://report/ViewAttendance/ViewAttendance.php"
 
 # 遅刻判定の基準時刻（HH:MM形式）
 # この時刻の「次の分」以降を遅刻とする
-# 例: "09:30" → 9:30まで正常、〇9:31以降が遅刻
+# 例: "09:30" → 9:30まで正常、9:31以降が遅刻
 late_threshold: "09:30"
 
 # 朝チェックモード
@@ -27,7 +27,9 @@ email:
   use_tls: true                       # STARTTLS を使う場合は true
   use_ssl: false                      # SMTPS(ポート465)を使う場合は true
   sender: "tomokazu_miura@e-trek-japan.com"
-  password: "FdQ#W6nu"      # 認証不要なら空文字 ""
+  # パスワードはWindowsの資格情報マネージャーに保存します（config.yamlには書きません）
+  # 初回登録コマンド:
+  #   python -c "import keyring; keyring.set_password('timecard_notifier', 'tomokazu_miura@e-trek-japan.com', 'パスワード')"
   recipients:
     - "tomokazu_miura@e-trek-japan.com"
 
@@ -49,10 +51,15 @@ overtime:
 
   # 勤務状況管理シートのパス（社内サーバーのUNCパスも可）
   # 例: "\\\\server\\share\\勤務状況管理シート.xlsx"
-  excel_path: ""
+  excel_path: '\\lorthos\データ受け渡し\残業時間申請\【AM】残業時間管理(1日-末日)_2026年度.xlsx'
 
   # 残業とみなす退勤時刻の基準（この時刻以降の退勤を残業としてチェック）
   overtime_threshold: "18:30"
+
+  # 集計単位（分）
+  # 申請時刻から「unit_minutes - 1」分以内の退勤は超過とみなさない
+  # 例: unit_minutes=15, 申請19:30 → 19:44まで許容、19:45以降が超過
+  unit_minutes: 15
 
   # 月別シート名のフォーマット（{month}=月, {year}=年）
   # 例: "6月" になる

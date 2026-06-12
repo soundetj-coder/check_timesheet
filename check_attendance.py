@@ -9,6 +9,7 @@ import re
 import smtplib
 import socket
 import sys
+import unicodedata
 from datetime import date, datetime, time, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -16,6 +17,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+import keyring
 import jpholiday
 import yaml
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -39,7 +41,7 @@ def log(msg: str) -> None:
 
 
 def _hhmm_to_minutes(s: str) -> int:
-    """\"HH:MM\" を分に換算する。不正な値は -1。"""
+    """"HH:MM" を分に換算する。不正な値は -1。"""
     try:
         h, m = s.split(":")
         return int(h) * 60 + int(m)
@@ -370,7 +372,7 @@ def _is_late(clock_in: str, cell_html: str, config: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _excel_value_to_hhmm(value) -> str:
-    """Excelセルの値を \"HH:MM\" 文字列に変換する。空・不明は空文字。"""
+    """Excelセルの値を "HH:MM" 文字列に変換する。空・不明は空文字。"""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -452,8 +454,43 @@ def _find_application_column(ws, target_day: int, ot_cfg: dict) -> int:
 
 
 def _normalize_name(name: str) -> str:
-    """氏名のスペース（半角・全角）を除去して比較用に正規化する。"""
+    """氏名を比較用に正規化する（フリガナ・スペース除去）。"""
+    name = re.sub(r'[（(][^）)]*[）)]', '', name)
     return name.replace(" ", "").replace("　", "").strip()
+
+
+def _display_name(name: str) -> str:
+    """フリガナ（カッコ内）を除去した表示用の氏名を返す（スペースは保持）。"""
+    return re.sub(r'[（(][^）)]*[）)]', '', name).strip()
+
+
+def _ea_width(s: str) -> int:
+    """文字列の表示幅を返す（全角=2、半角=1）。"""
+    return sum(
+        2 if unicodedata.east_asian_width(c) in ('W', 'F', 'A') else 1
+        for c in s
+    )
+
+
+def _ljust_ea(s: str, width: int) -> str:
+    """表示幅ベースで左揃えにパディングする。"""
+    pad = max(0, width - _ea_width(s))
+    return s + ' ' * pad
+
+
+def _rjust_ea(s: str, width: int) -> str:
+    """表示幅ベースで右揃えにパディングする。"""
+    pad = max(0, width - _ea_width(s))
+    return ' ' * pad + s
+
+
+def _floor_to_unit(hhmm: str, unit_minutes: int) -> str:
+    """時刻文字列を unit_minutes 単位で切り捨てる（例: 20:08 → 20:00）。"""
+    minutes = _hhmm_to_minutes(hhmm)
+    if minutes < 0:
+        return hhmm
+    floored = (minutes // unit_minutes) * unit_minutes
+    return f"{floored // 60:02d}:{floored % 60:02d}"
 
 
 def _find_employee_row(ws, name: str, name_col: int, data_start_row: int) -> int:
@@ -515,6 +552,14 @@ def check_overtime_applications(
     name_col = column_index_from_string(ot_cfg.get("name_column", "C"))
     data_start_row = ot_cfg.get("data_start_row", 16)
 
+    # 集計単位（分）に基づく許容幅
+    # 例: unit_minutes=15 → tolerance=14分
+    #   申請あり: 申請時刻+14分まで許容
+    #   申請なし: overtime_threshold+14分まで許容（18:30基準なら18:44まで申請不要）
+    threshold_min = _hhmm_to_minutes(ot_cfg.get("overtime_threshold", "18:30"))
+    unit_minutes = ot_cfg.get("unit_minutes", 15)
+    tolerance = unit_minutes - 1
+
     violations = []
     for emp in prev_overtime:
         name = emp["name"]
@@ -522,7 +567,7 @@ def check_overtime_applications(
 
         row = _find_employee_row(ws, name, name_col, data_start_row)
         if row < 0:
-            log(f"  シート上に氏名なし: '{name}' (正規化後: '{_normalize_name(name)}'")
+            log(f"  シート上に氏名なし: '{name}' (正規化後: '{_normalize_name(name)}')")
             violations.append(
                 {"name": name, "clock_out": clock_out, "applied": "", "reason": "シート上に氏名なし"}
             )
@@ -530,11 +575,16 @@ def check_overtime_applications(
 
         applied = _excel_value_to_hhmm(ws.cell(row=row, column=app_col).value)
         log(f"  {name}: 退勤={clock_out}, 申請={applied if applied else '(なし)'}")
+
         if not applied:
-            violations.append(
-                {"name": name, "clock_out": clock_out, "applied": "", "reason": "申請なし"}
-            )
-        elif _hhmm_to_minutes(clock_out) > _hhmm_to_minutes(applied):
+            # 申請なし: overtime_threshold + tolerance を超えた場合のみ違反
+            # 例: 18:30+14分=18:44 → 18:45以降が違反
+            if _hhmm_to_minutes(clock_out) > threshold_min + tolerance:
+                violations.append(
+                    {"name": name, "clock_out": clock_out, "applied": "", "reason": "申請なし"}
+                )
+        elif _hhmm_to_minutes(clock_out) > _hhmm_to_minutes(applied) + tolerance:
+            # 申請あり: 申請時刻 + tolerance を超えた場合のみ違反
             violations.append(
                 {
                     "name": name,
@@ -627,14 +677,30 @@ def format_message(
             lines.append(
                 f"\n■ 前営業日（{prev_date_str}）残業申請チェック ({len(overtime_violations)}名)"
             )
+            # 各行の表示用値を事前に計算（実残業時間は集計単位で切り捨て）
+            unit_minutes = config.get("overtime", {}).get("unit_minutes", 15)
+            rows_data = []
             for v in overtime_violations:
+                name = _display_name(v["name"])
+                applied_str = v["applied"] if v["applied"] else "────"
+                actual = _floor_to_unit(v["clock_out"], unit_minutes)
                 if v["reason"] == "申請時間超過":
-                    detail = f"退勤{v['clock_out']} / 申請{v['applied']}（超過）"
-                elif v["reason"] == "申請なし":
-                    detail = f"退勤{v['clock_out']} / 残業申請なし"
-                else:
-                    detail = f"退勤{v['clock_out']} / {v['reason']}"
-                lines.append(f"  ・{v['name']}：{detail}")
+                    actual += "（超過）"
+                rows_data.append((name, applied_str, actual))
+
+            # 各列の最大表示幅を計算（ヘッダーと全データ行で）
+            col1_w = max(_ea_width("氏名"), max(_ea_width(r[0]) for r in rows_data))
+            col2_w = max(_ea_width("事前申請時間"), max(_ea_width(r[1]) for r in rows_data))
+            col3_w = max(_ea_width("実残業時間"), max(_ea_width(r[2]) for r in rows_data))
+
+            lines.append(
+                f"  {_ljust_ea('氏名', col1_w)}  {_rjust_ea('事前申請時間', col2_w)}  {'実残業時間'}"
+            )
+            lines.append(f"  {'─' * (col1_w + col2_w + col3_w + 4)}")
+            for name, applied_str, actual in rows_data:
+                lines.append(
+                    f"  {_ljust_ea(name, col1_w)}  {_rjust_ea(applied_str, col2_w)}  {actual}"
+                )
         else:
             lines.append(
                 f"\n■ 前営業日（{prev_date_str}）残業申請チェック: 違反なし"
@@ -670,9 +736,18 @@ def send_email(message: str, config: dict) -> None:
     smtp_server = email_cfg["smtp_server"]
     smtp_port = email_cfg["smtp_port"]
     sender = email_cfg["sender"]
-    password = email_cfg.get("password", "")
     use_tls = email_cfg.get("use_tls", True)
     use_ssl = email_cfg.get("use_ssl", False)
+
+    # Windowsの資格情報マネージャーからパスワードを取得
+    password = keyring.get_password("timecard_notifier", sender) or ""
+    if not password:
+        log(
+            "SMTPパスワードが資格情報マネージャーに登録されていません。\n"
+            "  以下のコマンドを一度だけ実行してください:\n"
+            f"  python -c \"import keyring; keyring.set_password('timecard_notifier', '{sender}', 'パスワード')\""
+        )
+        raise RuntimeError("SMTPパスワード未設定")
 
     try:
         if use_ssl:
@@ -703,7 +778,8 @@ def send_email(message: str, config: dict) -> None:
     except smtplib.SMTPAuthenticationError:
         log(
             "メール送信エラー: SMTP認証に失敗しました。\n"
-            "  → config.yaml の sender ・ password を確認してください。"
+            f"  → 資格情報マネージャーに登録したパスワードを確認してください。\n"
+            f"  python -c \"import keyring; keyring.set_password('timecard_notifier', '{sender}', '正しいパスワード')\""
         )
         raise
     except Exception as exc:
@@ -785,7 +861,6 @@ def main() -> None:
             log(f"  - {e['name']}: 退勤={e['clock_out']}")
     else:
         log("前営業日残業者: 0名")
-        # タイムカードから取得できた退勤時刻のサンプルを出力（なぜ0名かの診断用）
         if prev_attendance:
             log(f"  前営業日打刻サンプル（最大5名、閾値={ot_cfg.get('overtime_threshold','18:30')}）:")
             for e in prev_attendance[:5]:
