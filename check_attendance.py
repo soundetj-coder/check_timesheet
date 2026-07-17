@@ -128,6 +128,37 @@ def _get_main_table_rows(page) -> list:
     return main_table.query_selector_all("tr")
 
 
+def _wait_for_day_table(page, target_dt, attempts: int = 8, interval_ms: int = 1500) -> list:
+    """今日の日付列を持つデータテーブルが描画されるまで待って行リストを返す。
+
+    「何らかのtableが出た」だけでは、AJAXでデータが届く前の空枠を掴んで
+    しまうことがある（全員未打刻の原因）。実際に当日列が見つかるまで
+    リトライし、途中で「一覧表示」を再クリックしてデータ描画を促す。
+    """
+    for i in range(attempts):
+        try:
+            page.wait_for_load_state("networkidle", timeout=10_000)
+        except PlaywrightTimeoutError:
+            pass
+
+        rows = _get_main_table_rows(page)
+        if rows and _find_day_column(rows, target_dt) > 0 and len(rows) > 1:
+            if i > 0:
+                log(f"データテーブル取得に成功しました（{i + 1}回目の試行）。")
+            return rows
+
+        log(f"当日列付きデータテーブル待機中... ({i + 1}/{attempts})")
+        page.wait_for_timeout(interval_ms)
+        # データがまだ来ていない場合、一覧表示を再クリックして描画を促す
+        try:
+            _click_list_button(page)
+        except RuntimeError:
+            pass
+
+    # 最後まで見つからなくても、取得できている行を返す（呼び出し側で判断）
+    return _get_main_table_rows(page)
+
+
 # ---------------------------------------------------------------------------
 # スクレイピング
 # ---------------------------------------------------------------------------
@@ -163,16 +194,21 @@ def scrape_attendance(
             browser.close()
             return [], []
 
-        today_rows = _get_main_table_rows(page)
+        # 空枠テーブルを掴まないよう、当日列付きのデータテーブルが揃うまで待つ
+        today_dt = datetime.combine(today, datetime.min.time())
+        today_rows = _wait_for_day_table(page, today_dt)
         if not today_rows:
             log("テーブルが見つかりませんでした。")
             browser.close()
             return [], []
 
-        today_dt = datetime.combine(today, datetime.min.time())
-        today_employees = _parse_rows(
-            today_rows, _find_day_column(today_rows, today_dt), config
-        )
+        day_col = _find_day_column(today_rows, today_dt)
+        if day_col <= 0:
+            log(
+                "警告: 当日の日付列を特定できませんでした。"
+                "ページのデータ描画が間に合っていない可能性があります。"
+            )
+        today_employees = _parse_rows(today_rows, day_col, config)
 
         prev_in_different_month = (
             prev_biz_day.year != today.year or prev_biz_day.month != today.month
