@@ -821,8 +821,11 @@ def send_slack(message: str, config: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # --test / --dry-run : メール・Slackを送信せず結果のみ表示（動作確認用）
+    dry_run = any(a in ("--test", "--dry-run", "-n") for a in sys.argv[1:])
+
     LOG_DIR.mkdir(exist_ok=True)
-    log("タイムカード確認開始")
+    log("タイムカード確認開始" + ("（テストモード: 通知は送信しません）" if dry_run else ""))
 
     today = date.today()
     if not is_business_day(today):
@@ -842,6 +845,16 @@ def main() -> None:
         sys.exit(1)
 
     log(f"{len(today_employees)} 名のデータを取得しました。")
+
+    # テストモード: 取得できた打刻の生データをダンプ（未打刻の原因調査用）
+    if dry_run:
+        log("── 取得した今日の打刻データ（生データ）──")
+        for e in today_employees:
+            log(
+                f"  {e['name']}: status={e['status']}, "
+                f"出勤='{e['clock_in']}', 退勤='{e['clock_out']}'"
+            )
+        log("──────────────────────────────")
 
     prev_missing = [e for e in prev_attendance if not e["clock_out"]]
     if prev_missing:
@@ -876,6 +889,11 @@ def main() -> None:
         today_employees, prev_missing, overtime_violations, prev_biz_day, config
     )
     log("\n" + message + "\n")
+
+    if dry_run:
+        log("テストモードのため、メール・Slackは送信しませんでした。")
+        log("タイムカード確認完了（テストモード）")
+        return
 
     failed: list[str] = []
 
