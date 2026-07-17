@@ -11,6 +11,7 @@ import socket
 import sys
 import unicodedata
 from datetime import date, datetime, time, timedelta
+from time import sleep
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -856,6 +857,66 @@ def send_slack(message: str, config: dict) -> None:
 # エントリポイント
 # ---------------------------------------------------------------------------
 
+def _scrape_failed(today_employees: list[dict]) -> bool:
+    """打刻データの取得に失敗したとみなせるか判定する。
+
+    - 社員が1名も取れない
+    - 全員が出勤・退勤ともに空（当日列の未検出／描画失敗の可能性）
+    のいずれかを「取得失敗」とみなす。
+    """
+    if not today_employees:
+        return True
+    return all(
+        not e["clock_in"] and not e["clock_out"] for e in today_employees
+    )
+
+
+def format_failure_message(config: dict, attempts: int) -> str:
+    """打刻データを取得できなかった場合のエラーレポートを生成する。"""
+    now = datetime.now()
+    date_str = now.strftime("%Y年%m月%d日")
+    return "\n".join(
+        [
+            f"【タイムカード確認レポート】{date_str}",
+            f"確認時刻: {now.strftime('%H:%M')}",
+            "=" * 44,
+            "",
+            "■ エラー: タイムカードの打刻データを取得できませんでした。",
+            f"  {attempts}回試行しましたが、勤怠システムから打刻を読み取れませんでした。",
+            "",
+            "  考えられる原因:",
+            "   ・勤怠システム（イントラ）が停止・応答していない",
+            "   ・ネットワーク／サーバーの不調",
+            "   ・実行PCとサーバー間の接続不良",
+            "   ・ページ構成の変更",
+            "",
+            "  → お手数ですが、勤怠システムを手動でご確認ください。",
+        ]
+    )
+
+
+def _dispatch_notifications(message: str, config: dict, dry_run: bool) -> None:
+    """メール・Slackへ通知を送る。失敗があれば exit(1)。テスト時は送信しない。"""
+    if dry_run:
+        log("テストモードのため、メール・Slackは送信しませんでした。")
+        return
+
+    failed: list[str] = []
+    try:
+        send_email(message, config)
+    except Exception:
+        failed.append("メール")
+
+    try:
+        send_slack(message, config)
+    except Exception:
+        failed.append("Slack")
+
+    if failed:
+        log(f"通知失敗: {', '.join(failed)}")
+        sys.exit(1)
+
+
 def main() -> None:
     # --test / --dry-run : メール・Slackを送信せず結果のみ表示（動作確認用）
     dry_run = any(a in ("--test", "--dry-run", "-n") for a in sys.argv[1:])
@@ -873,11 +934,33 @@ def main() -> None:
 
     config = load_config()
 
-    log("スクレイピング中...")
-    today_employees, prev_attendance = scrape_attendance(config, prev_biz_day)
+    # 取得失敗時のリトライ設定（デフォルト: 15分後に1回再試行）
+    retry_count = int(config.get("retry_on_failure", 1))
+    retry_interval = int(config.get("retry_interval_minutes", 15))
 
-    if not today_employees:
-        log("社員データを取得できませんでした。スクリプトを終了します。")
+    attempt = 0
+    while True:
+        attempt += 1
+        log(f"スクレイピング中...（{attempt}回目）")
+        today_employees, prev_attendance = scrape_attendance(config, prev_biz_day)
+
+        if not _scrape_failed(today_employees):
+            break  # 取得成功
+
+        if attempt <= retry_count and not dry_run:
+            log(
+                f"打刻データを取得できませんでした。"
+                f"{retry_interval}分後に再試行します（残り {retry_count - attempt + 1} 回）。"
+            )
+            sleep(retry_interval * 60)
+            continue
+
+        # リトライ上限に到達（またはテストモード）→ エラーレポートを送信
+        log("打刻データを取得できませんでした。エラーレポートを送信します。")
+        failure_msg = format_failure_message(config, attempt)
+        log("\n" + failure_msg + "\n")
+        _dispatch_notifications(failure_msg, config, dry_run)
+        log("タイムカード確認完了（取得失敗レポート送信）")
         sys.exit(1)
 
     log(f"{len(today_employees)} 名のデータを取得しました。")
@@ -926,28 +1009,12 @@ def main() -> None:
     )
     log("\n" + message + "\n")
 
+    _dispatch_notifications(message, config, dry_run)
+
     if dry_run:
-        log("テストモードのため、メール・Slackは送信しませんでした。")
         log("タイムカード確認完了（テストモード）")
-        return
-
-    failed: list[str] = []
-
-    try:
-        send_email(message, config)
-    except Exception:
-        failed.append("メール")
-
-    try:
-        send_slack(message, config)
-    except Exception:
-        failed.append("Slack")
-
-    if failed:
-        log(f"通知失敗: {', '.join(failed)}")
-        sys.exit(1)
-
-    log("タイムカード確認完了")
+    else:
+        log("タイムカード確認完了")
 
 
 if __name__ == "__main__":
